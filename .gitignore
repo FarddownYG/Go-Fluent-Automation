@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+gofluent_profile/
+data/
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db
