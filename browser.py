@@ -17,6 +17,7 @@ from answer_bank import AnswerBank, iter_questions
 from monthly_tracker import load_snapshot, save_snapshot, visible_history_groups, MONTHLY_GOAL
 
 BASE_URL = "https://esaip.gofluent.com/app/dashboard"
+EXPLORE_URL = BASE_URL + "/exploreChat"
 TRAINING_URL = "https://esaip.gofluent.com/app/training"
 ALLOWED_HOST = "esaip.gofluent.com"
 ROOT = Path(__file__).resolve().parent
@@ -131,13 +132,14 @@ class BrowserWorker(QThread):
     monthly_snapshot_changed = pyqtSignal(str)
     finished_signal = pyqtSignal()
 
-    def __init__(self, requested_count=10, min_level="Tous", max_level="B2", response_delay_seconds=20):
+    def __init__(self, requested_count=10, min_level="Tous", max_level="B2", response_delay_seconds=20, learning_need=""):
         super().__init__()
         self._stop_event = threading.Event()
         self.requested_count = requested_count
         self.min_level = min_level
         self.max_level = max_level
         self.response_delay_seconds = max(0, min(300, int(response_delay_seconds)))
+        self.learning_need = str(learning_need or "").strip()
         self.completed = 0
         self.results: list[dict] = []
         self._saved_result_count = 0
@@ -217,17 +219,25 @@ class BrowserWorker(QThread):
                     page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
                     self.wait_stable(page)
 
-                    if not self.wait_for_dashboard_activities(page):
-                        self.log("Aucune carte d’activité visible après chargement du tableau de bord et du menu Browse.")
-                        self.status_changed.emit("ERREUR")
-                        return
+                    if self.learning_need:
+                        items = self.generate_learning_activity(page)
+                        if not items:
+                            self.status_changed.emit("ERREUR")
+                            return
+                        selected = items
+                        unknown = excluded = 0
+                    else:
+                        if not self.wait_for_dashboard_activities(page):
+                            self.log("Aucune carte d’activité visible après chargement du tableau de bord et du menu Browse.")
+                            self.status_changed.emit("ERREUR")
+                            return
 
-                    report = inspect_dashboard(page)
-                    REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-                    items = [item for item in report["links"]
-                             if re.search(r"/app/dashboard/(?:mg/|resources/)", item["url"])
-                             and not re.search(r"/resources/(?:practice-speaking|practice-writing|video|article)(?:/)?$", item["url"])]
-                    selected, unknown, excluded = filter_by_level(items, self.min_level, self.max_level)
+                        report = inspect_dashboard(page)
+                        REPORT_PATH.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+                        items = [item for item in report["links"]
+                                 if re.search(r"/app/dashboard/(?:mg/|resources/)", item["url"])
+                                 and not re.search(r"/resources/(?:practice-speaking|practice-writing|video|article)(?:/)?$", item["url"])]
+                        selected, unknown, excluded = filter_by_level(items, self.min_level, self.max_level)
                     answerable = [(item, bank.answers_for(item.get("text") or "Activité"))
                                   for item in selected]
                     completed_urls = self.completed_urls()
@@ -360,6 +370,78 @@ class BrowserWorker(QThread):
                     pass
                 self._log_file = None
             self.finished_signal.emit()
+
+    def generate_learning_activity(self, page) -> list[dict]:
+        """Submit a custom learning need in GoFluent Explore and collect its activity link."""
+        self.log("Ouverture de GoFluent Explore content pour générer un entraînement.")
+        page.goto(EXPLORE_URL, wait_until="domcontentloaded", timeout=60000)
+        self.wait_stable(page)
+        prompt_box = page.get_by_placeholder(re.compile(r"learning needs", re.I))
+        try:
+            prompt_box.wait_for(state="visible", timeout=15000)
+            prompt_box.fill(self.learning_need)
+        except PlaywrightError:
+            self.log("Champ de demande Explore content introuvable. Vérifie la page GoFluent ou la connexion.")
+            return []
+
+        before = set(self.explore_activity_links(page))
+        sent = False
+        try:
+            form = prompt_box.locator("xpath=ancestor::form[1]")
+            if form.count():
+                submit = form.locator('button[type="submit"], input[type="submit"]')
+                if submit.count() and submit.first.is_visible() and submit.first.is_enabled():
+                    submit.first.click(timeout=3000)
+                    sent = True
+        except PlaywrightError:
+            pass
+        if not sent:
+            try:
+                wrapper = prompt_box.locator("xpath=ancestor::div[.//button][1]")
+                buttons = wrapper.locator("button")
+                if buttons.count() == 1 and buttons.first.is_visible() and buttons.first.is_enabled():
+                    buttons.first.click(timeout=3000)
+                    sent = True
+            except PlaywrightError:
+                pass
+        if not sent:
+            self.log("Impossible d’envoyer la demande Explore content.")
+            return []
+
+        self.log("Demande envoyée. Attente de la génération GoFluent AI (jusqu’à 2 min).")
+        deadline = time.monotonic() + 120
+        while not self.stopped() and time.monotonic() < deadline:
+            try:
+                page.wait_for_timeout(1000)
+                current = self.explore_activity_links(page)
+                generated = [url for url in current if url not in before]
+                if generated:
+                    return [{"text": "Entraînement personnalisé GoFluent AI", "url": url}
+                            for url in generated[:5]]
+        except PlaywrightError:
+            break
+        if self.stopped():
+            self.log("Attente de la génération interrompue.")
+        else:
+            self.log("Aucun lien d’activité généré détecté après 2 minutes. Aucune activité traitée.")
+        return []
+
+    @staticmethod
+    def explore_activity_links(page) -> list[str]:
+        try:
+            links = page.locator("a[href]").evaluate_all("elements => elements.map(a => a.href)")
+        except PlaywrightError:
+            return []
+        activity_urls = []
+        for href in links:
+            parsed = urlparse(href)
+            if (parsed.hostname == ALLOWED_HOST and
+                    re.search(r"/app/dashboard/(?:mg/|resources/)[^/]+/?$", parsed.path) and
+                    re.search(r"[0-9a-f]{8}-[0-9a-f-]{27,36}$", parsed.path, re.I)):
+                normalized = parsed._replace(query="", fragment="").geturl()
+                if normalized not in activity_urls:
+                    activity_urls.append(normalized)
+        return activity_urls
 
     def record(self, title: str, url: str, status: str, detail: str):
         self.results.append({"title": title, "url": url, "status": status,

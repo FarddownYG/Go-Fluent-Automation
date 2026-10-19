@@ -32,6 +32,31 @@ from monthly_tracker import (
 )
 
 
+LEARNING_NEED_CHOICES = [
+    ("Activités existantes du tableau de bord", ""),
+    ("Verbes irréguliers anglais", "English irregular verbs: past simple and past participle"),
+    ("Grammaire générale", "English grammar: a broad mix of grammar rules and usage"),
+    ("Temps verbaux et conjugaison", "English verb tenses and conjugation"),
+    ("Present perfect ou past simple", "choosing between the present perfect and past simple"),
+    ("Verbes modaux", "English modal verbs: can, could, may, might, must, should, and would"),
+    ("Phrasal verbs", "common English phrasal verbs in context"),
+    ("Prépositions", "English prepositions of time, place, and movement"),
+    ("Articles et déterminants", "English articles and determiners: a, an, the, some, and any"),
+    ("Conditionnels", "English conditional sentences and their verb forms"),
+    ("Questions et négation", "forming English questions and negative sentences"),
+    ("Vocabulaire du quotidien", "practical English vocabulary for everyday situations"),
+    ("Vocabulaire professionnel", "English vocabulary for work, meetings, and professional communication"),
+    ("Emails professionnels", "writing clear and polite professional emails in English"),
+    ("Voyage et demandes d’orientation", "English for travel, transport, hotels, and asking for directions"),
+    ("Compréhension orale", "English listening comprehension with spoken audio"),
+    ("Compréhension écrite", "English reading comprehension"),
+    ("Expression orale et conversation", "English speaking practice through a realistic conversation"),
+    ("Expression écrite", "English writing practice with useful feedback"),
+    ("Prononciation", "English pronunciation, stress, and connected speech"),
+    ("Entretien d’embauche", "English job interview questions and answers"),
+]
+
+
 class GoFluentApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -259,7 +284,7 @@ class GoFluentApp(QMainWindow):
         section_heading.setSpacing(3)
         config_title = QLabel("Configuration")
         config_title.setObjectName("section_title")
-        config_hint = QLabel("Choisis la plage de niveaux et le nombre d’activités à traiter.")
+        config_hint = QLabel("Choisis le niveau et le nombre d’activités. Thèmes suggérés ou demande libre.")
         config_hint.setObjectName("section_hint")
         section_heading.addWidget(config_title)
         section_heading.addWidget(config_hint)
@@ -288,6 +313,31 @@ class GoFluentApp(QMainWindow):
         self.activity_count.setMinimumWidth(0)
         self.activity_count.setMinimumHeight(42)
         self.activity_count.setToolTip("Saisis 0 pour parcourir toutes les activités traitables.")
+        self.learning_need = QComboBox()
+        self.learning_need.setEditable(True)
+        self.learning_need.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.learning_need.setMaxVisibleItems(12)
+        self.learning_need.setMinimumWidth(0)
+        self.learning_need.setMinimumHeight(42)
+        self.learning_need.lineEdit().setMaxLength(300)
+        self.learning_need.lineEdit().setPlaceholderText(
+            "Thème libre, en français ou en anglais…"
+        )
+        for label, topic in LEARNING_NEED_CHOICES:
+            self.learning_need.addItem(label, topic)
+        self.learning_need.setToolTip(
+            "Choisis une suggestion ou tape n’importe quel thème. "
+            "Une demande libre permet d’utiliser aussi les thèmes absents de la liste."
+        )
+        saved_need = str(self.settings.value("learning_need", ""))
+        saved_index = self.learning_need.findText(saved_need, Qt.MatchFlag.MatchExactly)
+        if saved_index >= 0:
+            self.learning_need.setCurrentIndex(saved_index)
+        elif saved_need:
+            self.learning_need.setEditText(saved_need)
+        self.learning_need.currentTextChanged.connect(
+            lambda value: self.settings.setValue("learning_need", value)
+        )
         self.response_delay = QSpinBox()
         self.response_delay.setRange(0, 300)
         self.response_delay.setSuffix(" s")
@@ -302,6 +352,7 @@ class GoFluentApp(QMainWindow):
             self.make_field("NIVEAU MINIMUM", self.min_level),
             self.make_field("NIVEAU MAXIMUM", self.max_level),
             self.make_field("NOMBRE D’ACTIVITÉS", self.activity_count),
+            self.make_field("CATÉGORIE / THÈME", self.learning_need),
             self.make_field("TEMPS AVANT RÉPONSE", self.response_delay),
         ]
         for field in self._field_widgets:
@@ -489,6 +540,7 @@ class GoFluentApp(QMainWindow):
         self.monthly_refresh_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.activity_count.setEnabled(False)
+        self.learning_need.setEnabled(False)
         self.response_delay.setEnabled(False)
         self.min_level.setEnabled(False)
         self.max_level.setEnabled(False)
@@ -506,7 +558,13 @@ class GoFluentApp(QMainWindow):
             self.progress_text.setText(f"0 / {self.requested_count} activités terminées")
 
         self.log("Démarrage de Playwright.")
-        self.worker = BrowserWorker(self.requested_count, min_level, max_level, self.response_delay.value())
+        learning_need = self.learning_need_prompt(min_level, max_level)
+        if learning_need:
+            self.log("Mode Explore content : génération d’un entraînement GoFluent AI.")
+        self.worker = BrowserWorker(
+            self.requested_count, min_level, max_level,
+            self.response_delay.value(), learning_need,
+        )
         self.worker.status_changed.connect(self.update_status)
         self.worker.log_message.connect(self.log)
         self.worker.page_changed.connect(self.update_url)
@@ -532,6 +590,7 @@ class GoFluentApp(QMainWindow):
         self.start_button.setEnabled(False)
         self.monthly_refresh_button.setEnabled(False)
         self.activity_count.setEnabled(False)
+        self.learning_need.setEnabled(False)
         self.response_delay.setEnabled(False)
         self.min_level.setEnabled(False)
         self.max_level.setEnabled(False)
@@ -554,6 +613,7 @@ class GoFluentApp(QMainWindow):
         self.open_button.setEnabled(True)
         self.start_button.setEnabled(True)
         self.activity_count.setEnabled(True)
+        self.learning_need.setEnabled(True)
         self.response_delay.setEnabled(True)
         self.min_level.setEnabled(True)
         self.max_level.setEnabled(True)
@@ -573,6 +633,26 @@ class GoFluentApp(QMainWindow):
         self.current_activity.setText("Arrêt en cours…")
         self.log("Demande d’arrêt envoyée.")
         self.worker.stop()
+
+    def learning_need_prompt(self, min_level: str, max_level: str) -> str:
+        text = self.learning_need.currentText().strip()
+        index = self.learning_need.findText(text, Qt.MatchFlag.MatchExactly)
+        if index >= 0:
+            topic = self.learning_need.itemData(index, Qt.ItemDataRole.UserRole)
+            if not topic:
+                return ""
+        else:
+            topic = text
+        if not topic:
+            return ""
+
+        level = (f"CEFR {min_level} to {max_level}" if min_level != "Tous"
+                 else f"up to CEFR {max_level}")
+        return (
+            "Create one interactive English practice activity about this topic or request: "
+            f"{topic}. Interpret French or English wording and tolerate common spelling mistakes. "
+            f"Target {level}. Use a suitable exercise format and include listening audio when relevant."
+        )
 
     def update_status(self, status):
         states = {
@@ -709,6 +789,7 @@ class GoFluentApp(QMainWindow):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.activity_count.setEnabled(True)
+        self.learning_need.setEnabled(True)
         self.response_delay.setEnabled(True)
         self.min_level.setEnabled(True)
         self.max_level.setEnabled(True)

@@ -41,6 +41,7 @@ Le profil et la session restent dans `gofluent_profile/` sur ton ordinateur. Ne 
 
 - **Niveau CECRL** : filtre minimum et maximum.
 - **Nombre d’activités** : `0` signifie sans limite numérique.
+- **Catégorie / thème** : choisis une suggestion (grammaire, verbes irréguliers, compréhension orale, etc.) ou écris une demande libre en français ou en anglais. La liste est indicative et n’est pas exhaustive. GoFluent AI génère un entraînement depuis **Explore content** ; la génération peut prendre jusqu’à 2 minutes. L’application s’arrête si aucun lien d’activité n’est détecté.
 - **Temps avant réponse** : 0 à 300 secondes, 20 secondes par défaut. Réglage mémorisé ; l’attente commence quand la question apparaît et s’interrompt avec **Arrêter**.
 
 ## Données et confidentialité
@@ -69,7 +70,7 @@ Vérifie que `git status` ne montre ni `data/`, ni `gofluent_profile/`, ni `.ven
 
 ## Fonctionnement et limites
 
-L’application lit les activités et les données de contenu chargées par GoFluent dans le compte connecté. Elle utilise uniquement les réponses explicites qu’elle peut relier sans ambiguïté aux questions prises en charge. Elle s’arrête si une réponse ou la progression n’est pas vérifiable ; une activité n’est comptée comme terminée qu’après confirmation de l’écran final.
+Sans thème personnalisé, l’application lit les activités et les données de contenu chargées par GoFluent dans le compte connecté. Avec un thème, elle envoie la demande à **Explore content**, puis traite les activités générées qu’elle détecte. Elle utilise uniquement les réponses explicites qu’elle peut relier sans ambiguïté aux questions prises en charge. Elle s’arrête si une réponse ou la progression n’est pas vérifiable ; une activité n’est comptée comme terminée qu’après confirmation de l’écran final.
 
 Les contenus de cours et les solutions ne sont pas inclus. L’application dépend de l’interface GoFluent, qui peut évoluer.
 
