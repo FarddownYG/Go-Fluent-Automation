@@ -268,9 +268,13 @@ class BrowserWorker(QThread):
                         self.activity_found.emit(label, url)
                         self.log(f"Ouverture : {label}")
                         try:
-                            self._current_activity_content_id = self.content_id_from_url(url)
+                            if self._current_activity_url != url:
+                                self._current_activity_content_id = self.content_id_from_url(url)
                             self._current_activity_url = url
-                            page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                            if page.url != url:
+                                page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                            else:
+                                self.log("Page de l’activité déjà ouverte après sélection du résultat IA.")
                             self.wait_stable(page)
                             self.page_changed.emit(page.url)
                             site_done, site_evidence = self.site_completion_state(page)
@@ -387,7 +391,6 @@ class BrowserWorker(QThread):
             self.log("Champ de demande Explore content introuvable. Vérifie la page GoFluent ou la connexion.")
             return []
 
-        before = set(self.explore_activity_links(page))
         sent = False
         try:
             form = prompt_box.locator("xpath=ancestor::form[1]")
@@ -413,32 +416,72 @@ class BrowserWorker(QThread):
 
         self.log("Demande envoyée. Attente de la génération GoFluent AI (jusqu’à 2 min).")
         deadline = time.monotonic() + 120
-        generated_urls: set[str] = set()
-        last_new_link_at = None
+        previous_signature = None
+        stable_since = None
         while not self.stopped() and time.monotonic() < deadline:
             try:
                 page.wait_for_timeout(1000)
-                current = self.explore_activity_links(page)
-                new_urls = set(current) - before - generated_urls
-                if new_urls:
-                    generated_urls.update(new_urls)
-                    last_new_link_at = time.monotonic()
-                if generated_urls and last_new_link_at is not None and time.monotonic() - last_new_link_at >= 5:
-                    candidates = [item for item in self.explore_activity_items(page)
-                                  if item["url"] in generated_urls]
-                    best = self.most_relevant_activity(candidates, self.learning_need)
-                    if best:
-                        self.log(f"Activité sélectionnée : {best['text']}.")
-                        return [best]
-                    self.log("Résultats GoFluent AI détectés, mais aucun titre ne correspond assez au thème. Aucun lien ouvert.")
-                    return []
+                results = self.explore_result_buttons(page)
+                signature = tuple(item["text"] for item in results)
+                if results and signature == previous_signature:
+                    stable_since = stable_since or time.monotonic()
+                    if time.monotonic() - stable_since >= 2:
+                        best = self.most_relevant_activity(results, self.learning_need)
+                        if not best:
+                            self.log("GoFluent AI a affiché des résultats, mais aucun titre ne correspond au thème. Aucun résultat ouvert.")
+                            return []
+                        result_button = page.locator(
+                            "section[aria-labelledby^='ai-search-query-'] button"
+                        ).nth(best["index"])
+                        old_url = page.url
+                        self._current_activity_content_id = self.content_id_from_url(old_url)
+                        self._current_activity_url = old_url
+                        result_button.click(timeout=5000)
+                        navigation_deadline = time.monotonic() + 20
+                        while not self.stopped() and time.monotonic() < navigation_deadline:
+                            if page.url != old_url:
+                                break
+                            if self.has_visible_action(page, ("Start", "Begin", "Continue", "Resume")):
+                                break
+                            page.wait_for_timeout(250)
+                        self.wait_stable(page)
+                        selected_url = page.url
+                        if (urlparse(selected_url).hostname != ALLOWED_HOST
+                                or urlparse(selected_url).path.rstrip("/") == urlparse(EXPLORE_URL).path):
+                            self.log("Le résultat a été cliqué, mais GoFluent n’a pas ouvert sa page d’activité.")
+                            return []
+                        self._current_activity_url = selected_url
+                        best["url"] = selected_url
+                        self.log(f"Résultat sélectionné et ouvert : {best['text']}.")
+                        return [{"text": best["text"], "url": selected_url}]
+                else:
+                    previous_signature = signature
+                    stable_since = time.monotonic() if results else None
             except PlaywrightError:
-                break
+                if self.stopped():
+                    break
         if self.stopped():
             self.log("Attente de la génération interrompue.")
         else:
-            self.log("Aucun lien d’activité généré détecté après 2 minutes. Aucune activité traitée.")
+            self.log("Aucun bouton de résultat détecté après 2 minutes. Aucune activité traitée.")
         return []
+
+    @staticmethod
+    def explore_result_buttons(page) -> list[dict]:
+        """Read the clickable AI search results. GoFluent renders these as buttons, not links."""
+        results = []
+        try:
+            buttons = page.locator("section[aria-labelledby^='ai-search-query-'] button")
+            for index in range(min(buttons.count(), 100)):
+                button = buttons.nth(index)
+                if not button.is_visible() or not button.is_enabled():
+                    continue
+                text = " ".join(button.inner_text(timeout=800).split())
+                if text:
+                    results.append({"text": text[:180], "index": index})
+        except PlaywrightError:
+            return []
+        return results
 
     @staticmethod
     def explore_activity_links(page) -> list[str]:
@@ -756,9 +799,8 @@ class BrowserWorker(QThread):
         # Some GoFluent content (for example practical-guide activities) has no
         # Learn/Practice tab: its route already renders the Practice start card.
         # Treat that state as ready; start_activity() still performs the click.
-        start_button = page.get_by_role("button", name=re.compile(r"^(?:start|begin|continue|resume|reprendre)$", re.I))
         try:
-            if start_button.count() and start_button.first.is_visible():
+            if self.find_start_button(page):
                 return True
         except Exception:
             pass
@@ -788,23 +830,37 @@ class BrowserWorker(QThread):
         return False
 
     @staticmethod
+    def find_start_button(page):
+        """Find a GoFluent Start control by accessible name or visible button text."""
+        for name in ("Start", "Begin", "Continue", "Resume", "Reprendre"):
+            button = page.get_by_role("button", name=re.compile(rf"^{re.escape(name)}$", re.I))
+            try:
+                if button.count() and button.first.is_visible() and button.first.is_enabled():
+                    return button.first
+            except Exception:
+                pass
+        # Some GoFluent builds add visible helper text to the button name.
+        try:
+            start = page.locator("button").filter(
+                has_text=re.compile(r"^\s*(?:Start|Begin|Continue|Resume|Reprendre)(?:\s|$)", re.I)
+            )
+            if start.count() and start.first.is_visible() and start.first.is_enabled():
+                return start.first
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
     def start_activity(page) -> bool:
         """Start an activity after its Practice tab and answer data are ready."""
-        for pattern in (re.compile(r"^(?:start|begin|continue|resume|reprendre)$", re.I),):
-            button = page.get_by_role("button", name=pattern)
-            if button.count() and button.first.is_visible():
-                button.first.click(timeout=3000)
+        button = BrowserWorker.find_start_button(page)
+        if button:
+            try:
+                button.click(timeout=3000)
                 page.wait_for_timeout(700)
                 return True
-        # GoFluent currently marks its Start card as role="presentation".
-        try:
-            start = page.locator("button").filter(has_text=re.compile(r"^\s*Start(?:\s|$)", re.I))
-            if start.count() and start.first.is_visible():
-                start.first.click(timeout=3000)
-                page.wait_for_timeout(700)
-                return True
-        except Exception:
-            pass
+            except PlaywrightError:
+                return False
         try:
             start_text = page.get_by_text("Start", exact=True)
             if start_text.count() and start_text.first.is_visible():
