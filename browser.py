@@ -418,8 +418,8 @@ class BrowserWorker(QThread):
                 if generated:
                     return [{"text": "Entraînement personnalisé GoFluent AI", "url": url}
                             for url in generated[:5]]
-        except PlaywrightError:
-            break
+            except PlaywrightError:
+                break
         if self.stopped():
             self.log("Attente de la génération interrompue.")
         else:
