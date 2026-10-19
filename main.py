@@ -33,7 +33,7 @@ from monthly_tracker import (
 
 
 LEARNING_NEED_CHOICES = [
-    ("Activités existantes du tableau de bord", ""),
+    ("— Choisir un thème —", ""),
     ("Verbes irréguliers anglais", "English irregular verbs: past simple and past participle"),
     ("Grammaire générale", "English grammar: a broad mix of grammar rules and usage"),
     ("Temps verbaux et conjugaison", "English verb tenses and conjugation"),
@@ -284,7 +284,7 @@ class GoFluentApp(QMainWindow):
         section_heading.setSpacing(3)
         config_title = QLabel("Configuration")
         config_title.setObjectName("section_title")
-        config_hint = QLabel("Choisis le niveau et le nombre d’activités. Thèmes suggérés ou demande libre.")
+        config_hint = QLabel("Choisis la source des activités, puis règle le niveau et le thème si besoin.")
         config_hint.setObjectName("section_hint")
         section_heading.addWidget(config_title)
         section_heading.addWidget(config_hint)
@@ -313,6 +313,21 @@ class GoFluentApp(QMainWindow):
         self.activity_count.setMinimumWidth(0)
         self.activity_count.setMinimumHeight(42)
         self.activity_count.setToolTip("Saisis 0 pour parcourir toutes les activités traitables.")
+        self.activity_source = QComboBox()
+        self.activity_source.addItem("Activités du tableau de bord", "dashboard")
+        self.activity_source.addItem("Créer un entraînement avec GoFluent AI", "ai")
+        self.activity_source.setToolTip(
+            "Le tableau de bord n’envoie aucune demande à l’IA. Choisis le mode GoFluent AI pour créer un thème."
+        )
+        self.activity_source.setMinimumWidth(0)
+        self.activity_source.setMinimumHeight(42)
+        saved_source = str(self.settings.value("activity_source", "dashboard"))
+        source_index = self.activity_source.findData(saved_source)
+        self.activity_source.setCurrentIndex(source_index if source_index >= 0 else 0)
+        self.activity_source.currentIndexChanged.connect(self.activity_source_changed)
+        self.activity_source.currentIndexChanged.connect(
+            lambda _index: self.settings.setValue("activity_source", self.activity_source.currentData())
+        )
         self.learning_need = QComboBox()
         self.learning_need.setEditable(True)
         self.learning_need.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -333,11 +348,13 @@ class GoFluentApp(QMainWindow):
         saved_index = self.learning_need.findText(saved_need, Qt.MatchFlag.MatchExactly)
         if saved_index >= 0:
             self.learning_need.setCurrentIndex(saved_index)
-        elif saved_need:
+        elif saved_need and saved_need != "Activités existantes du tableau de bord":
             self.learning_need.setEditText(saved_need)
         self.learning_need.currentTextChanged.connect(
             lambda value: self.settings.setValue("learning_need", value)
         )
+        self.learning_need.setEnabled(self.activity_source.currentData() == "ai")
+        self.activity_source_changed(self.activity_source.currentIndex())
         self.response_delay = QSpinBox()
         self.response_delay.setRange(0, 300)
         self.response_delay.setSuffix(" s")
@@ -352,6 +369,7 @@ class GoFluentApp(QMainWindow):
             self.make_field("NIVEAU MINIMUM", self.min_level),
             self.make_field("NIVEAU MAXIMUM", self.max_level),
             self.make_field("NOMBRE D’ACTIVITÉS", self.activity_count),
+            self.make_field("SOURCE DES ACTIVITÉS", self.activity_source),
             self.make_field("CATÉGORIE / THÈME", self.learning_need),
             self.make_field("TEMPS AVANT RÉPONSE", self.response_delay),
         ]
@@ -535,11 +553,17 @@ class GoFluentApp(QMainWindow):
             self.log("Configuration invalide : le niveau minimum dépasse le niveau maximum.")
             self.set_status("Configuration invalide", "error")
             return
+        learning_need = self.learning_need_prompt(min_level, max_level)
+        if self.activity_source.currentData() == "ai" and not learning_need:
+            self.log("Choisis ou écris un thème avant de demander un entraînement à GoFluent AI.")
+            self.set_status("Thème requis", "error")
+            return
 
         self.start_button.setEnabled(False)
         self.monthly_refresh_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.activity_count.setEnabled(False)
+        self.activity_source.setEnabled(False)
         self.learning_need.setEnabled(False)
         self.response_delay.setEnabled(False)
         self.min_level.setEnabled(False)
@@ -558,7 +582,6 @@ class GoFluentApp(QMainWindow):
             self.progress_text.setText(f"0 / {self.requested_count} activités terminées")
 
         self.log("Démarrage de Playwright.")
-        learning_need = self.learning_need_prompt(min_level, max_level)
         if learning_need:
             self.log("Mode Explore content : génération d’un entraînement GoFluent AI.")
         self.worker = BrowserWorker(
@@ -590,6 +613,7 @@ class GoFluentApp(QMainWindow):
         self.start_button.setEnabled(False)
         self.monthly_refresh_button.setEnabled(False)
         self.activity_count.setEnabled(False)
+        self.activity_source.setEnabled(False)
         self.learning_need.setEnabled(False)
         self.response_delay.setEnabled(False)
         self.min_level.setEnabled(False)
@@ -613,7 +637,8 @@ class GoFluentApp(QMainWindow):
         self.open_button.setEnabled(True)
         self.start_button.setEnabled(True)
         self.activity_count.setEnabled(True)
-        self.learning_need.setEnabled(True)
+        self.activity_source.setEnabled(True)
+        self.learning_need.setEnabled(self.activity_source.currentData() == "ai")
         self.response_delay.setEnabled(True)
         self.min_level.setEnabled(True)
         self.max_level.setEnabled(True)
@@ -634,7 +659,17 @@ class GoFluentApp(QMainWindow):
         self.log("Demande d’arrêt envoyée.")
         self.worker.stop()
 
+    def activity_source_changed(self, _index: int):
+        use_ai = self.activity_source.currentData() == "ai"
+        self.learning_need.setEnabled(use_ai)
+        self.learning_need.setPlaceholderText(
+            "Choisis un thème ou écris ta demande…" if use_ai
+            else "Disponible en mode GoFluent AI"
+        )
+
     def learning_need_prompt(self, min_level: str, max_level: str) -> str:
+        if self.activity_source.currentData() != "ai":
+            return ""
         text = self.learning_need.currentText().strip()
         index = self.learning_need.findText(text, Qt.MatchFlag.MatchExactly)
         if index >= 0:
@@ -789,7 +824,8 @@ class GoFluentApp(QMainWindow):
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.activity_count.setEnabled(True)
-        self.learning_need.setEnabled(True)
+        self.activity_source.setEnabled(True)
+        self.learning_need.setEnabled(self.activity_source.currentData() == "ai")
         self.response_delay.setEnabled(True)
         self.min_level.setEnabled(True)
         self.max_level.setEnabled(True)

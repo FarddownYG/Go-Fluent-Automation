@@ -222,7 +222,7 @@ class BrowserWorker(QThread):
                     if self.learning_need:
                         items = self.generate_learning_activity(page)
                         if not items:
-                            self.status_changed.emit("ERREUR")
+                            self.status_changed.emit("ARRÊT" if self.stopped() else "ERREUR")
                             return
                         selected = items
                         unknown = excluded = 0
@@ -410,14 +410,20 @@ class BrowserWorker(QThread):
 
         self.log("Demande envoyée. Attente de la génération GoFluent AI (jusqu’à 2 min).")
         deadline = time.monotonic() + 120
+        generated_urls: set[str] = set()
+        last_new_link_at = None
         while not self.stopped() and time.monotonic() < deadline:
             try:
                 page.wait_for_timeout(1000)
                 current = self.explore_activity_links(page)
-                generated = [url for url in current if url not in before]
-                if generated:
+                new_urls = set(current) - before - generated_urls
+                if new_urls:
+                    generated_urls.update(new_urls)
+                    last_new_link_at = time.monotonic()
+                if generated_urls and last_new_link_at is not None and time.monotonic() - last_new_link_at >= 5:
+                    self.log(f"Génération détectée : {len(generated_urls)} activité(s) prête(s).")
                     return [{"text": "Entraînement personnalisé GoFluent AI", "url": url}
-                            for url in generated[:5]]
+                            for url in sorted(generated_urls)]
             except PlaywrightError:
                 break
         if self.stopped():
@@ -429,14 +435,19 @@ class BrowserWorker(QThread):
     @staticmethod
     def explore_activity_links(page) -> list[str]:
         try:
-            links = page.locator("a[href]").evaluate_all("elements => elements.map(a => a.href)")
+            links = page.locator(
+                "a[href], [role='link'][href], [role='link'][data-href], [data-href]"
+            ).evaluate_all("""elements => elements
+                .map(el => el.href || el.getAttribute('href') || el.getAttribute('data-href'))
+                .filter(Boolean)
+                .map(href => new URL(href, window.location.href).href)""")
         except PlaywrightError:
             return []
         activity_urls = []
         for href in links:
             parsed = urlparse(href)
             if (parsed.hostname == ALLOWED_HOST and
-                    re.search(r"/app/dashboard/(?:mg/|resources/)[^/]+/?$", parsed.path) and
+                    re.search(r"/app/dashboard/(?:mg|resources)/.+$", parsed.path) and
                     re.search(r"[0-9a-f]{8}-[0-9a-f-]{27,36}$", parsed.path, re.I)):
                 normalized = parsed._replace(query="", fragment="").geturl()
                 if normalized not in activity_urls:
