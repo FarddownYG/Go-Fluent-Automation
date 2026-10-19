@@ -5,9 +5,10 @@ import json
 import re
 import threading
 import time
+import unicodedata
 from datetime import date, datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from PyQt6.QtCore import QThread, pyqtSignal
 from playwright.sync_api import sync_playwright, Error as PlaywrightError
@@ -147,6 +148,7 @@ class BrowserWorker(QThread):
         self._log_lock = threading.Lock()
         self._captured_content: dict[str, dict] = {}
         self._current_activity_content_id: str | None = None
+        self._current_activity_url: str | None = None
 
     def stop(self):
         self._stop_event.set()
@@ -267,6 +269,7 @@ class BrowserWorker(QThread):
                         self.log(f"Ouverture : {label}")
                         try:
                             self._current_activity_content_id = self.content_id_from_url(url)
+                            self._current_activity_url = url
                             page.goto(url, wait_until="domcontentloaded", timeout=45000)
                             self.wait_stable(page)
                             self.page_changed.emit(page.url)
@@ -299,7 +302,7 @@ class BrowserWorker(QThread):
                             self.log(f"Bouton Start cliqué : {label}. Attente des questions.")
                             self.wait_stable(page)
                             if not answers:
-                                content_id = self.content_id_from_url(url)
+                                content_id = self.content_id_from_url(url) or self._current_activity_content_id
                                 document = self._captured_content.get(content_id or "")
                                 unsupported = []
                                 if document:
@@ -421,9 +424,14 @@ class BrowserWorker(QThread):
                     generated_urls.update(new_urls)
                     last_new_link_at = time.monotonic()
                 if generated_urls and last_new_link_at is not None and time.monotonic() - last_new_link_at >= 5:
-                    self.log(f"Génération détectée : {len(generated_urls)} activité(s) prête(s).")
-                    return [{"text": "Entraînement personnalisé GoFluent AI", "url": url}
-                            for url in sorted(generated_urls)]
+                    candidates = [item for item in self.explore_activity_items(page)
+                                  if item["url"] in generated_urls]
+                    best = self.most_relevant_activity(candidates, self.learning_need)
+                    if best:
+                        self.log(f"Activité sélectionnée : {best['text']}.")
+                        return [best]
+                    self.log("Résultats GoFluent AI détectés, mais aucun titre ne correspond assez au thème. Aucun lien ouvert.")
+                    return []
             except PlaywrightError:
                 break
         if self.stopped():
@@ -434,25 +442,86 @@ class BrowserWorker(QThread):
 
     @staticmethod
     def explore_activity_links(page) -> list[str]:
+        return [item["url"] for item in BrowserWorker.explore_activity_items(page)]
+
+    @staticmethod
+    def explore_activity_items(page) -> list[dict[str, str]]:
         try:
             links = page.locator(
                 "a[href], [role='link'][href], [role='link'][data-href], [data-href]"
             ).evaluate_all("""elements => elements
-                .map(el => el.href || el.getAttribute('href') || el.getAttribute('data-href'))
-                .filter(Boolean)
-                .map(href => new URL(href, window.location.href).href)""")
+                .map(el => ({
+                    href: el.href || el.getAttribute('href') || el.getAttribute('data-href'),
+                    text: (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim()
+                }))
+                .filter(item => item.href)
+                .map(item => ({ ...item, href: new URL(item.href, window.location.href).href }))""")
         except PlaywrightError:
             return []
-        activity_urls = []
-        for href in links:
-            parsed = urlparse(href)
-            if (parsed.hostname == ALLOWED_HOST and
-                    re.search(r"/app/dashboard/(?:mg|resources)/.+$", parsed.path) and
-                    re.search(r"[0-9a-f]{8}-[0-9a-f-]{27,36}$", parsed.path, re.I)):
-                normalized = parsed._replace(query="", fragment="").geturl()
-                if normalized not in activity_urls:
-                    activity_urls.append(normalized)
-        return activity_urls
+        activity_links = []
+        seen = set()
+        ignored_paths = {"/", "/app/dashboard", "/app/dashboard/home", "/app/dashboard/training",
+                         "/app/dashboard/exploreChat", "/app/training", "/login"}
+        for item in links:
+            parsed = urlparse(item["href"])
+            path = parsed.path.rstrip("/")
+            query_ids = parse_qs(parsed.query)
+            has_query_id = any(
+                re.fullmatch(r"[0-9a-f-]{36}", value, re.I)
+                for key in ("id", "contentId", "content_id")
+                for value in query_ids.get(key, [])
+            )
+            if (parsed.hostname != ALLOWED_HOST or
+                    (path in ignored_paths and not (path == "/app/dashboard/exploreChat" and has_query_id))):
+                continue
+            normalized = parsed._replace(fragment="").geturl()
+            if normalized not in seen:
+                seen.add(normalized)
+                activity_links.append({"url": normalized, "text": " ".join(item["text"].split())[:180]})
+        return activity_links
+
+    @staticmethod
+    def topic_terms(value: str) -> set[str]:
+        normalized = unicodedata.normalize("NFKD", value.casefold())
+        normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+        match = re.search(r"about this topic or request:\s*(.*?)\.\s*Interpret", normalized)
+        topic = match.group(1) if match else normalized
+        translations = {
+            "verbe": "verb", "verbes": "verb", "irregulier": "irregular", "irreguliere": "irregular",
+            "grammaire": "grammar", "conjugaison": "conjugation", "temps": "tense",
+            "verbaux": "verb", "verbale": "verb", "modaux": "modal", "prepositions": "preposition",
+            "preposition": "preposition", "conditionnels": "conditional", "vocabulaire": "vocabulary",
+            "professionnel": "professional", "professionnelle": "professional", "courriel": "email",
+            "emails": "email", "mail": "email", "voyage": "travel", "voyages": "travel",
+            "orientation": "direction", "ecoute": "listening", "orale": "listening", "oral": "listening",
+            "lecture": "reading", "ecrite": "reading", "prononciation": "pronunciation",
+            "entretien": "interview", "embauche": "interview", "questions": "question",
+            "negation": "negative", "articles": "article", "determinants": "determiner",
+        }
+        stop_words = {"the", "and", "for", "with", "about", "english", "practice", "activity",
+                      "activities", "common", "in", "to", "of", "a", "an", "use", "include",
+                      "topic", "request", "target", "up", "cefr", "interpret", "french", "wording",
+                      "tolerate", "spelling", "mistakes", "suitable", "exercise", "format", "when",
+                      "relevant", "this", "one", "interactive", "audio"}
+        terms = set()
+        for token in re.findall(r"[a-z0-9]+", topic):
+            translated = translations.get(token, token)
+            if translated not in stop_words and len(translated) > 2:
+                terms.add(translated.rstrip("s"))
+        return terms
+
+    @staticmethod
+    def most_relevant_activity(items: list[dict[str, str]], learning_need: str) -> dict[str, str] | None:
+        terms = BrowserWorker.topic_terms(learning_need)
+        scored = []
+        for index, item in enumerate(items):
+            title = unicodedata.normalize("NFKD", item.get("text", "").casefold())
+            title = "".join(char for char in title if not unicodedata.combining(char))
+            title_terms = {token.rstrip("s") for token in re.findall(r"[a-z0-9]+", title)}
+            overlap = len(terms & title_terms)
+            if overlap:
+                scored.append((overlap, -index, item))
+        return max(scored, default=(0, 0, None))[2]
 
     def record(self, title: str, url: str, status: str, detail: str):
         self.results.append({"title": title, "url": url, "status": status,
@@ -565,7 +634,14 @@ class BrowserWorker(QThread):
     def content_id_from_url(url: str) -> str | None:
         """Extract the activity UUID from its dashboard URL, without guessing API routes."""
         match = re.search(r"/([0-9a-f]{8}-[0-9a-f-]{27,})/?$", url, re.I)
-        return match.group(1).lower() if match else None
+        if match:
+            return match.group(1).lower()
+        query = parse_qs(urlparse(url).query)
+        for key in ("id", "contentId", "content_id"):
+            for value in query.get(key, []):
+                if re.fullmatch(r"[0-9a-f-]{36}", value, re.I):
+                    return value.lower()
+        return None
 
     def capture_content_response(self, response):
         """Cache quiz/content JSON returned by the authenticated GoFluent UI."""
@@ -586,6 +662,8 @@ class BrowserWorker(QThread):
             # Associate it with the activity currently opened in the visible UI.
             content_id = (self._current_activity_content_id if quiz_match
                           else content_match.group(1).lower())
+            if content_match and self._current_activity_url and not self._current_activity_content_id:
+                self._current_activity_content_id = content_id
             if not content_id:
                 return
             if response.ok and any(True for _ in iter_questions(document)):

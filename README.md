@@ -42,7 +42,7 @@ Le profil et la session restent dans `gofluent_profile/` sur ton ordinateur. Ne 
 - **Niveau CECRL** : filtre minimum et maximum.
 - **Nombre d’activités** : `0` signifie sans limite numérique.
 - **Source des activités** : `Activités du tableau de bord` est le choix par défaut et n’envoie rien à l’IA. Choisis `Créer un entraînement avec GoFluent AI` pour activer le thème.
-- **Catégorie / thème** : en mode GoFluent AI, choisis une suggestion ou écris une demande libre en français ou en anglais. La liste n’est pas exhaustive. Un thème est obligatoire avant le démarrage ; la génération via **Explore content** peut prendre jusqu’à 2 minutes.
+- **Catégorie / thème** : en mode GoFluent AI, choisis une suggestion ou écris une demande libre en français ou en anglais. La liste n’est pas exhaustive. Un thème est obligatoire avant le démarrage ; la génération via **Explore content** peut prendre jusqu’à 2 minutes. L’application repère les nouveaux liens et ouvre le résultat dont le titre correspond le mieux au thème.
 - **Temps avant réponse** : 0 à 300 secondes, 20 secondes par défaut. Réglage mémorisé ; l’attente commence quand la question apparaît et s’interrompt avec **Arrêter**.
 
 ## Données et confidentialité
